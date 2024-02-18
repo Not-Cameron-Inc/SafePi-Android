@@ -39,6 +39,8 @@ import androidx.compose.ui.platform.LocalContext
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import java.util.Locale
+
 
 
 class MainActivity : ComponentActivity() {
@@ -105,10 +107,13 @@ class MainActivity : ComponentActivity() {
 
                         // Use the MAC address for a more stable connection
                         val deviceAddress = scanResult.device.address
-                        val device = bluetoothAdapter?.getRemoteDevice(deviceAddress)
-                        device?.let {
-                            bluetoothGatt = it.connectGatt(this@MainActivity, false, gattCallback)
+                        bluetoothAdapter?.getRemoteDevice(deviceAddress)?.let { device ->
+                            // Connect to the device's GATT server
+                            bluetoothGatt = device.connectGatt(this@MainActivity, false, gattCallback)
                             connectionStatusMessage.value = "Connecting to SafePi..."
+                        } ?: run {
+                            Log.e("MainActivity", "Device not found: $deviceAddress")
+                            // Update UI or logic to handle the error
                         }
                     }
                 }
@@ -154,54 +159,68 @@ class MainActivity : ComponentActivity() {
             super.onConnectionStateChange(gatt, status, newState)
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
-                    // Check if BLUETOOTH_CONNECT permission is granted
-                    if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-                        // Request BLUETOOTH_CONNECT permission
-                        ActivityCompat.requestPermissions(this@MainActivity, arrayOf(Manifest.permission.BLUETOOTH_CONNECT), REQUEST_BLUETOOTH_CONNECT_PERMISSION)
+                    if (status == BluetoothGatt.GATT_SUCCESS) {
+                        // Delay service discovery to ensure bond state is handled properly, especially on older Android versions
+                        handler.postDelayed({
+                            if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
+                                try {
+                                    gatt?.discoverServices()
+                                } catch (e: Exception) {
+                                    Log.e("BluetoothGatt", "Error discovering services: ${e.message}")
+                                }
+                            } else {
+                                ActivityCompat.requestPermissions(this@MainActivity, arrayOf(Manifest.permission.BLUETOOTH_CONNECT), REQUEST_BLUETOOTH_CONNECT_PERMISSION)
+                            }
+                        }, 1000) // Delay set to 1 second
                     } else {
-                        // Permission is already granted, proceed with discovering services
-                        gatt?.discoverServices()
-                        connectionStatusMessage.value = "Connected to SafePi"
+                        Log.e("MainActivity", "Connection failed with status: $status")
+                        gatt?.close()
                     }
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
+                    Log.i("MainActivity", "Disconnected from GATT server.")
                     connectionStatusMessage.value = "Disconnected"
+                    gatt?.close()
                 }
             }
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt?, status: Int) {
-            super.onServicesDiscovered(gatt, status)
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                gatt?.getService(UUID.fromString("A07498CA-AD5B-474E-940D-16F1FBE7E8CD"))
-                    ?.getCharacteristic(UUID.fromString("51FF12BB-3ED8-46E5-B4F9-D64E2FEC021B"))
-                    ?.let { characteristic ->
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                            if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-                                ActivityCompat.requestPermissions(this@MainActivity, arrayOf(Manifest.permission.BLUETOOTH_CONNECT), REQUEST_BLUETOOTH_CONNECT_PERMISSION)
-                            } else {
-                                gatt.readCharacteristic(characteristic)
-                            }
-                        } else {
-                            gatt.readCharacteristic(characteristic)
-                        }
+                Log.i("MainActivity", "Services discovered.")
+                val serviceUUID = UUID.fromString("a07498ca-ad5b-474e-940d-16f1fbe7e8cd").toString().lowercase(Locale.getDefault())
+                val characteristicUUID = UUID.fromString("51ff12bb-3ed8-46e5-b4f9-d64e2fec021b").toString().lowercase(Locale.getDefault())
+                val service = gatt?.getService(UUID.fromString(serviceUUID))
+                val characteristic = service?.getCharacteristic(UUID.fromString(characteristicUUID))
+
+                if (characteristic != null) {
+                    if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
+                        gatt.readCharacteristic(characteristic)
+                    } else {
+                        ActivityCompat.requestPermissions(this@MainActivity, arrayOf(Manifest.permission.BLUETOOTH_CONNECT), REQUEST_BLUETOOTH_CONNECT_PERMISSION)
                     }
+                } else {
+                    Log.e("MainActivity", "Characteristic $characteristicUUID not found")
+                }
+            } else {
+                Log.e("MainActivity", "Service discovery failed with status: $status")
             }
         }
 
         override fun onCharacteristicRead(gatt: BluetoothGatt?, characteristic: BluetoothGattCharacteristic?, status: Int) {
-            super.onCharacteristicRead(gatt, characteristic, status)
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                // Successfully read the characteristic
-                val data = characteristic?.value
-                Log.d("MainActivity", "Characteristic read successfully: ${data?.let { Arrays.toString(it) }}")
+            if (status == BluetoothGatt.GATT_SUCCESS && characteristic != null) {
+                val data = characteristic.value
+                Log.i("MainActivity", "Characteristic read successfully: ${Arrays.toString(data)}")
+                // Process the data as needed
             } else {
-                Log.w("MainActivity", "Characteristic read failed: $status")
+                Log.e("MainActivity", "Characteristic read failed with status: $status")
             }
         }
 
-        // Implement other callback methods such as onCharacteristicWrite, onCharacteristicChanged, etc.
+        // Implement other callback methods as needed
     }
+
+
 
     private fun checkPermissionsAndStartScan() {
         val requiredPermissions = mutableListOf(
